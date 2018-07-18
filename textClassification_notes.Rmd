@@ -1,0 +1,446 @@
+---
+title: "Text Classification - eRum2018"
+output: html_notebook
+---
+
+Lots of data are textual. We want to get closer to people thoughts.
+
+Ananlysis framework + LIME
+
+
+# Text mining
+
+## Packages
+
+```{r}
+library(readr)
+library(dplyr)
+library(stringr)
+library(lubridate)
+library(ggplot2)
+library(quanteda)
+library(lime)
+```
+
+Several packages do the text mining operations.
+
+quanteda is easier for data exploration and data visualization, and contains some modelling inside.
+
+## Data
+
+```{r}
+tweet_csv <- read_csv("tweets.csv")
+str(tweet_csv, give.attr = FALSE)
+```
+
+
+## Little data explaration
+```{r}
+table(tweet_csv$handle, tweet_csv$is_retweet)
+table(tweet_csv$lang)
+table(tweet_csv$handle, tweet_csv$lang)
+```
+
+Clinton is retwitting more
+
+## Data formatting
+
+```{r}
+tweet_data <- tweet_csv %>% 
+  #  filter(is_retweet == "False") %>%
+  select(author = handle,
+         text,
+         retweet_count,
+         favorite_count,
+         source_url,
+         timestamp = time) %>% 
+  mutate(date = as_date(str_sub(timestamp, 1, 10)),
+         hour = hour(hms(str_sub(timestamp, 12, 19))),
+         tweet_num = row_number()) %>% 
+  select(-timestamp)
+```
+
+
+## Bag of words
+
+Order and punctuation doesn't matter, just the frequency of words matters.
+
+We will use just words and frequencies to predict the right class.
+
+
+
+## Tokens
+
+Strings or character strings are tockens. Tokensing means split into words and punctuation. You can also split into sentences, and personalize tokensing.
+
+### Tokenizing  single word
+
+```{r}
+example_text <- tweet_data$text[1]
+
+quanteda::tokens(example_text, "word")
+
+```
+
+### Tokenizing 2 words (ngrams)
+
+It's possible to tokenize into n-grams (bigrams, trigrams etc)
+
+```{r}
+quanteda::tokens(example_text, "word", ngrams = 2)
+```
+
+### Tokenizing sentences
+
+```{r}
+quanteda::tokens(example_text, "sentence")
+
+```
+
+
+## Corpus
+
+Collection of the document: corpus. It contains data and metadata.
+
+
+```{r}
+tweet_corpus <- quanteda::corpus(tweet_data)
+```
+
+We get documents plus metadata.
+
+
+### Subset corpus data
+
+```{r}
+summary(quanteda::corpus_subset(tweet_corpus, date > as_date('2016-07-01')), 
+        n =nrow(tweet_data))
+
+```
+
+
+### Querying corpus data
+
+```{r}
+quanteda::kwic(tweet_corpus, "terror")
+```
+
+We get the side by side text of each tweet, around the given word.
+
+If we want to check who is the author of something, we can run something like: 
+
+```{r}
+corpus_subset(tweet_corpus, author == "realDonaldTrump")["text340"]
+```
+
+If we check using the Hillary Clinton name, we get an NA
+
+```{r}
+corpus_subset(tweet_corpus, author == "HillaryClinton")["text340"]
+```
+
+Other checks:
+
+```{r}
+kwic(tweet_corpus, "immigrant*")
+kwic(tweet_corpus, "famil*")
+kwic(tweet_corpus, "thank")
+```
+
+
+## Explorative data viz
+
+```{r}
+tweet_summary <- summary(tweet_corpus, n =nrow(tweet_data))
+
+head(tweet_summary)
+```
+
+#### Date and author
+
+We check for author and date how many tweets they write and the average number of words and senetences
+
+```{r}
+tweet_summary_tbl <- tweet_summary %>% 
+  group_by(author, date) %>% 
+  summarize(no_tweets = n_distinct(Text),
+            avg_words = mean(Tokens),
+            avg_sentences = mean(Sentences))
+```
+
+A visualization of it:
+
+```{r}
+tweet_summary_tbl %>% 
+  ggplot(aes(x = date, y = no_tweets, fill = author, colour = author)) +
+  geom_line() +
+  geom_point() 
+```
+
+We can see that there's a missing area in data that we should consider.
+
+Hillary Clinton has very high picks.
+
+```{r}
+tweet_summary_tbl %>% 
+  ggplot(aes(x = date, y = avg_words, fill = author, colour = author)) +
+  geom_line() +
+  geom_point() 
+```
+
+Trump has very short tweets, sometimes.
+
+```{r}
+tweet_summary_tbl %>% 
+  ggplot(aes(x = date, y = avg_sentences, fill = author, colour = author)) +
+  geom_line() +
+  geom_point() 
+```
+
+Even if Hillary Clinton uses more words, she has an average number of sentences lower of Trump: Trump uses many short sentences
+
+
+### Hour and author
+
+```{r}
+tweet_summary_tbl2 <- tweet_summary %>% 
+  group_by(author, hour) %>% 
+  summarize(no_tweets = n_distinct(Text),
+            avg_words = mean(Tokens),
+            avg_sentences = mean(Sentences)) 
+```
+
+
+```{r}
+tweet_summary_tbl2 %>%
+  ggplot(aes(x = hour, y = no_tweets, fill = author, colour = author)) +
+  geom_line() +
+  geom_point() 
+```
+
+Similar patterns, but Hillary Clinton has a longer drop off during night.
+
+
+## dfm
+
+Document Feature Matrix: a frequency table for each token per document.
+
+From dfm starts the analysis.
+
+Usually is sparse, with lots of zero. Sparse matrix can be trated as normal matrix but are stored in a more efficient way. dfm are sparse to optimize the code efficiency
+
+```{r}
+my_dfm <- dfm(tweet_corpus)
+my_dfm
+```
+
+99.9% sparse
+
+```{r}
+my_dfm[1:10, 1:10]
+```
+
+
+### ngrams
+
+```{r}
+my_dfm2 <- dfm(tweet_corpus, ngrams = 2)
+my_dfm2[1:10, 1:20]
+```
+
+```{r}
+my_dfm2
+```
+
+Number of features is grown, almost all zero.
+
+### Top features
+
+```{r}
+topfeatures(my_dfm, 50)
+```
+
+It's not very clean: we have stop words, punctuation..
+
+
+## Data cleaning
+
+- Make all letters lower case
+
+- Truncate words to the roots (ex: family and families)
+
+- Remove repetitive words, stop words. There are dictionaries of stop words.
+
+- Remove punctuation, urls, repetitive words
+
+How to clean data is up to the analyst: sometimes punctuation or upper case are informative. On the other side sometimes some words are not informative (etc for an insurance company, the word "policy" is very frequent and not informative)
+
+```{r}
+edited_dfm <- dfm(tweet_corpus, remove_url = TRUE, remove_punct = TRUE, remove = stopwords("english"))
+topfeatures(edited_dfm, 20)
+```
+
+
+#### Stopwords
+
+There is the stopwords package that contains stopwords for many languages.
+
+
+### Wordclouds
+
+We can visualize the top features throug a wordcloud. If the wordcloud looks ugly, change the seed :D
+
+```{r}
+set.seed(100)
+textplot_wordcloud(edited_dfm, 
+                   min.freq = 40, 
+                   random.order = FALSE, 
+                   rot.per = .25, 
+                   colors = RColorBrewer::brewer.pal(8,"Dark2"))
+
+```
+
+They use their names a lot!
+
+Wordclouds give a first impact of the text
+
+### Comparison - Wordclouds by author
+
+```{r}
+by_author_dfm <- dfm(tweet_corpus,
+                     groups = "author",
+                     remove = stopwords("english"), 
+                     remove_punct = TRUE, remove_url = TRUE)
+
+by_author_dfm[1:2,1:10]
+```
+
+```{r}
+set.seed(200)
+textplot_wordcloud(by_author_dfm,
+                   comparison = TRUE,
+                   min.freq = 50,
+                   random.order = FALSE,
+                   rot.per = .25, 
+                   colors = RColorBrewer::brewer.pal(8,"Dark2"))
+```
+
+Now it's a comparison. Trump says a lot of thank, while Hillary says a lot the names.
+
+
+
+## tidy text
+
+```{r, eval = F}
+library(tidytext)
+tidy(dfm())
+```
+
+Good way to qickly explore data.
+
+
+# Text modeling
+
+We create a function that create the dfm matrix.
+
+```{r}
+get_matrix <- function(df){
+  corpus <- quanteda::corpus(df)
+  #dfm <- quanteda::dfm(corpus, tolower = TRUE, stem = TRUE, remove = c(stopwords("english"), "will"), ngrams = 1:2)
+  dfm <- quanteda::dfm(corpus, remove_url = TRUE, remove_punct = TRUE, 
+                       remove = stopwords("english"))
+}
+
+```
+
+We want to standardize training set and test set, so that they have the same features.
+
+```{r}
+set.seed(32984)
+trainIndex <- sample.int(n = nrow(tweet_data), 
+                         size = floor(.8*nrow(tweet_data)), replace = F)
+
+train_dfm <- get_matrix(tweet_data$text[trainIndex])
+train_raw <- tweet_data[, c("text", "tweet_num")][as.vector(trainIndex), ]
+train_labels <- tweet_data$author[as.vector(trainIndex)] == "realDonaldTrump"
+
+test_dfm <- get_matrix(tweet_data$text[-trainIndex])
+test_raw <- tweet_data[, c("text", "tweet_num")][-as.vector(trainIndex), ]
+test_labels <- tweet_data$author[-as.vector(trainIndex)] == "realDonaldTrump"
+
+```
+
+
+```{r}
+### make sure that train & test sets have exactly same features
+test_dfm <- dfm_select(test_dfm, train_dfm)
+
+# check that the train and test set have the same 
+all(train_dfm@Dimnames$features == test_dfm@Dimnames$features)
+```
+
+## Naive Bayes
+
+```{r}
+nb_model <- quanteda::textmodel_nb(train_dfm, train_labels)
+nb_preds <- predict(nb_model, test_dfm) 
+```
+
+Accuracy:
+
+```{r}
+print(mean(nb_preds$nb.predicted == test_labels))
+```
+
+The accuracy is not everything
+
+
+## Understanding a model
+
+Understanding a model is about trust
+
+Should I trust the results of my prediction and take action accordingly?
+
+Will the results give me my desired effect? 
+
+Is the model setted to work well in real life (eg there are cases not considered by my model?)
+
+## LIME 
+
+Local: drivers for local areas - observation level
+
+Interpretable: results are understandable 
+
+Model-agnostic: works on all models
+
+Explanations: show the drivers of the model prediction
+
+Can be used on text, images and numerical data.
+
+What was important for that particular observation? 
+
+Assumes that at a local level you can run a linear regression. Often the relation between classes is not linear, but LIME trys to zoom into the data at a very local level, and then trys to find the linear regression that distinguish between the two.
+
+LIME helps communication, because helps model understanding.
+
+#### Husky vs wolf
+
+An image wrongly classified as wolf, while it is an husky: if we look at the explanation, the model classified it wrongly looking at the background (snow)
+
+### Example
+
+```{r}
+predictions_tbl <- data.frame(predict_label = nb_preds$nb.predicted,
+                              actual_label = test_labels,
+                              tweet_name = rownames(nb_preds$posterior.prob)
+) %>%
+  mutate(tweet_num = 
+           as.integer(
+             str_trim(
+               str_replace_all(tweet_name, "text", ""))
+           )) 
+```
+
+
+
+
